@@ -9,8 +9,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("DiskTool")]
 [assembly: AssemblyDescription("Saúde e formatação de discos (NVMe / SSD / HDD)")]
 [assembly: AssemblyProduct("DiskTool")]
-[assembly: AssemblyVersion("2.8.0.0")]
-[assembly: AssemblyFileVersion("2.8.0.0")]
+[assembly: AssemblyVersion("2.9.0.0")]
+[assembly: AssemblyFileVersion("2.9.0.0")]
 
 static class Program
 {
