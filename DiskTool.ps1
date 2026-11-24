@@ -1,5 +1,5 @@
 ﻿<#
-    DiskTool 2.8 - Verificação de saúde e formatação/zeragem de discos (NVMe, SSD e HDD)
+    DiskTool 2.9 - Verificação de saúde e formatação/zeragem de discos (NVMe, SSD e HDD)
 
     Uso:
       - DiskTool.exe ou "Iniciar DiskTool.bat" (pedem permissão de administrador).
@@ -13,7 +13,7 @@
 param([switch]$ListOnly, [switch]$Monitor, [string]$AppDir, [string]$AppExe)
 
 $ErrorActionPreference = 'Stop'
-$AppVersion = '2.8'
+$AppVersion = '2.9'
 $ScriptDir  = Split-Path -Parent $PSCommandPath
 if ($AppDir) { $ScriptDir = $AppDir }   # quando iniciado pelo DiskTool.exe: pasta do .exe
 $LogFile  = Join-Path $ScriptDir 'DiskTool.log'
@@ -2013,6 +2013,11 @@ $chkBench = New-Object Windows.Forms.CheckBox
 $chkBench.Text = 'Modo bancada: diagnosticar automaticamente cada disco que for conectado'
 $chkBench.AutoSize = $true; $chkBench.Location = New-Object Drawing.Point(260, 394); $chkBench.Checked = [bool]$Settings.Bancada
 $form.Controls.Add($chkBench)
+$lnkUpdate = New-Object Windows.Forms.LinkLabel
+$lnkUpdate.AutoSize = $true; $lnkUpdate.Location = New-Object Drawing.Point(730, 396); $lnkUpdate.Anchor = 'Top, Right'
+$lnkUpdate.Visible = $false; $lnkUpdate.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
+$lnkUpdate.Name = 'keep'
+$form.Controls.Add($lnkUpdate)
 $tipBench = New-Object Windows.Forms.ToolTip
 $tipBench.SetToolTip($chkBench, ("Ao conectar um disco (USB, dock, SATA hot-swap), o DiskTool roda o Diagnóstico completo sozinho e salva o laudo em PDF.`r`n" +
     "Só lê o disco - nada é apagado. Discos do sistema e os que já estavam conectados não são testados. Cliente/OS preenchidos vão para o laudo."))
@@ -2066,6 +2071,7 @@ $picHist.Dock = 'Fill'; $picHist.BackColor = 'White'
 $tabHistChart.Controls.Add($picHist)
 $script:HistDisk = $null; $script:HistData = @()
 $txtDet = $tabDet.Controls[0]; $txtHist = $tabHist.Controls[0]; $txtLog = $tabLog.Controls[0]
+$txtDet.WordWrap = $true; $txtDet.ScrollBars = 'Vertical'   # frases longas (motivos, observações) quebram a linha em vez de sumir à direita
 $tabs.TabPages.AddRange(@($tabDet, $tabHist, $tabHistChart, $tabChart, $tabLog))
 $form.Controls.Add($tabs)
 
@@ -3578,5 +3584,146 @@ $chkBench.Add_CheckedChanged({
     try { Save-Settings $Settings } catch { }
     Write-Log $(if ($chkBench.Checked) { 'Modo bancada ATIVADO: discos conectados a partir de agora serão diagnosticados automaticamente.' } else { 'Modo bancada desativado.' })
 })
+# ----- Atualização automática pelo GitHub (Releases)
+# Consulta a última versão sem travar a tela (HttpClient assíncrono + timer). Falhas (sem internet, proxy) são só registradas no log.
+$UpdateRepo = 'michaelmmichelon/DiskTool'
+$script:Update = $null; $script:UpdTask = $null; $script:UpdStage = $null
+
+function Get-UpdHttp {
+    if (-not $script:UpdHttp) {
+        Add-Type -AssemblyName System.Net.Http
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $h = New-Object Net.Http.HttpClient
+        $h.Timeout = [TimeSpan]::FromMinutes(5)
+        $h.DefaultRequestHeaders.UserAgent.ParseAdd("DiskTool/$AppVersion")
+        $script:UpdHttp = $h
+    }
+    return $script:UpdHttp
+}
+
+function Start-UpdateCheck {
+    try {
+        $script:UpdTask = (Get-UpdHttp).GetStringAsync("https://api.github.com/repos/$UpdateRepo/releases/latest")
+        $script:UpdStage = 'check'
+        $updTimer.Start()
+    } catch { Write-Log "Verificação de atualização indisponível: $($_.Exception.Message)" }
+}
+
+function Complete-UpdateCheck($json) {
+    $rel = $json | ConvertFrom-Json
+    $ver = ("$($rel.tag_name)" -replace '^[vV]', '').Trim()
+    $new = $null; $cur = $null
+    if (-not [version]::TryParse($ver, [ref]$new) -or -not [version]::TryParse($AppVersion, [ref]$cur)) { return }
+    if ($new -le $cur) { return }
+    $asset = @($rel.assets | Where-Object { $_.name -eq 'DiskTool.exe' }) | Select-Object -First 1
+    $script:Update = [pscustomobject]@{
+        Version = $ver; Page = $rel.html_url; Notes = "$($rel.body)"
+        Url = $(if ($asset) { $asset.browser_download_url }); Size = $(if ($asset) { [int64]$asset.size } else { 0 })
+        Sha256 = $(if ($asset -and "$($asset.digest)" -match '^sha256:([0-9a-fA-F]{64})$') { $Matches[1].ToLower() })
+    }
+    $lnkUpdate.Text = "⬆ Nova versão $ver disponível - clique para atualizar"
+    $lnkUpdate.LinkColor = $(if ($script:IsDark) { [Drawing.Color]::FromArgb(110, 170, 255) } else { [Drawing.Color]::FromArgb(0, 90, 200) })
+    $lnkUpdate.Left = $form.ClientSize.Width - $lnkUpdate.PreferredWidth - (S 12)
+    $lnkUpdate.Visible = $true
+    Write-Log "Nova versão do DiskTool disponível: $ver (atual: $AppVersion)."
+}
+
+$updTimer = New-Object Windows.Forms.Timer
+$updTimer.Interval = 400
+$updTimer.Add_Tick({
+    $t = $script:UpdTask
+    if (-not $t) { $updTimer.Stop(); return }
+    if ($script:UpdStage -eq 'download' -and $script:Update.Size -gt 0) {
+        $lnkUpdate.Text = "Baixando a versão $($script:Update.Version)..."
+    }
+    if (-not $t.IsCompleted) { return }
+    $updTimer.Stop(); $script:UpdTask = $null
+    $stage = $script:UpdStage; $script:UpdStage = $null
+    if ($t.IsFaulted -or $t.IsCanceled) {
+        $why = 'cancelado'; if ($t.Exception) { $why = $t.Exception.GetBaseException().Message }
+        if ($stage -eq 'check') { Write-Log "Não foi possível verificar atualizações: $why" }
+        else { $lnkUpdate.Text = "⬆ Nova versão $($script:Update.Version) disponível - clique para atualizar"; $lnkUpdate.Enabled = $true
+               Show-Msg "Falha ao baixar a atualização: $why" 'Error' | Out-Null }
+        return
+    }
+    try {
+        if ($stage -eq 'check') { Complete-UpdateCheck $t.Result }
+        else { Install-Update $t.Result }
+    } catch {
+        Write-Log "Erro na atualização: $($_.Exception.Message)"
+        if ($stage -ne 'check') { $lnkUpdate.Enabled = $true; Show-Msg "Erro na atualização: $($_.Exception.Message)" 'Error' | Out-Null }
+    }
+})
+
+$lnkUpdate.Add_LinkClicked({
+    $u = $script:Update; if (-not $u) { return }
+    $notes = (($u.Notes -replace '\*\*|`', '') -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 12) -join "`r`n"
+    # Rodando pelo .ps1 (sem o .exe) ou release sem o .exe: só abre a página de download
+    if (-not $AppExe -or -not (Test-Path $AppExe) -or -not $u.Url) {
+        if ((Show-Msg "Versão $($u.Version) disponível.`r`n`r`n$notes`r`n`r`nAbrir a página de download?" 'Information' 'YesNo') -eq 'Yes') { Start-Process $u.Page }
+        return
+    }
+    if (@(Get-ActiveOps).Count) { Show-Msg 'Há operações em andamento. Aguarde terminarem (ou cancele) antes de atualizar.' 'Warning' | Out-Null; return }
+    $r = Show-Msg ("Atualizar o DiskTool de $AppVersion para $($u.Version)?`r`n`r`n$notes`r`n`r`n" +
+                   "O programa vai baixar a nova versão do GitHub ($([Math]::Round($u.Size / 1KB)) KB), fechar e abrir de novo já atualizado. " +
+                   "Históricos, laudos, certificados e configurações são mantidos.") 'Question' 'YesNo'
+    if ($r -ne 'Yes') { return }
+    $lnkUpdate.Enabled = $false
+    $script:UpdTask = (Get-UpdHttp).GetByteArrayAsync($u.Url)
+    $script:UpdStage = 'download'
+    $updTimer.Start()
+    Write-Log "Baixando a versão $($u.Version) de $($u.Url)"
+})
+
+function Install-Update([byte[]]$bytes) {
+    $u = $script:Update
+    # Confere o arquivo antes de trocar: tamanho, cabeçalho de executável, SHA-256 (quando o GitHub informa) e versão
+    if ($u.Size -gt 0 -and $bytes.Length -ne $u.Size) { throw "download incompleto ($($bytes.Length) de $($u.Size) bytes)" }
+    if ($bytes.Length -lt 50KB -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'o arquivo baixado não é um executável válido' }
+    if ($u.Sha256) {
+        $h = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+        if ($h -ne $u.Sha256) { throw 'o arquivo baixado não confere com o publicado (SHA-256 diferente)' }
+    }
+    $dir = Split-Path $AppExe
+    $newExe = Join-Path $dir 'DiskTool_novo.exe'
+    [IO.File]::WriteAllBytes($newExe, $bytes)
+    $fv = (Get-Item $newExe).VersionInfo.FileVersion
+    $fvVer = $null
+    if (-not [version]::TryParse("$fv", [ref]$fvVer) -or $fvVer -lt [version]$u.Version) {
+        Remove-Item $newExe -Force -ErrorAction SilentlyContinue
+        throw "a versão do arquivo baixado ($fv) não é a esperada ($($u.Version))"
+    }
+    # O .exe em uso não pode ser substituído: um script separado espera o DiskTool fechar, troca o arquivo e reabre.
+    $waitPid = $PID
+    try {
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
+        $pp = Get-Process -Id $parent.ParentProcessId -ErrorAction Stop
+        if ($pp.Path -and ($pp.Path -eq $AppExe)) { $waitPid = $pp.Id }   # o launcher (DiskTool.exe)
+    } catch { }
+    $q = { param($s) "'" + ([string]$s).Replace("'", "''") + "'" }
+    $script = @"
+`$ErrorActionPreference = 'Stop'
+try { Wait-Process -Id $waitPid -Timeout 120 -ErrorAction SilentlyContinue } catch { }
+Start-Sleep -Milliseconds 800
+`$exe = $(& $q $AppExe); `$new = $(& $q $newExe); `$bak = `$exe + '.anterior'
+try {
+    Copy-Item -LiteralPath `$exe -Destination `$bak -Force
+    Move-Item -LiteralPath `$new -Destination `$exe -Force
+    Add-Content -LiteralPath $(& $q $LogFile) -Value ('[{0:yyyy-MM-dd HH:mm:ss}] Atualizado para a versão $($u.Version).' -f (Get-Date)) -Encoding UTF8
+} catch {
+    Add-Content -LiteralPath $(& $q $LogFile) -Value (('[{0:yyyy-MM-dd HH:mm:ss}] Falha ao instalar a atualização: ' -f (Get-Date)) + `$_.Exception.Message) -Encoding UTF8
+}
+if (`$env:DISKTOOL_UPDATE_NORESTART -ne '1') { Start-Process -FilePath `$exe }
+Remove-Item -LiteralPath `$PSCommandPath -Force -ErrorAction SilentlyContinue
+"@
+    $updPs1 = Join-Path ([IO.Path]::GetTempPath()) ("DiskTool_update_" + [guid]::NewGuid().ToString('N') + '.ps1')
+    [IO.File]::WriteAllText($updPs1, $script, (New-Object Text.UTF8Encoding($true)))
+    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$updPs1`""
+    Write-Log "Atualização $($u.Version) baixada e conferida; reiniciando o DiskTool."
+    $script:UpdatePs1 = $updPs1
+    $form.Close()
+}
+
+$form.Add_Shown({ Start-UpdateCheck })
 $form.ResumeLayout($false)
 [void]$form.ShowDialog()
